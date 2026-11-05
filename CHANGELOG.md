@@ -1,3 +1,13 @@
+# v0.4.0 — Direct Dictation & Task Routing
+
+- Live streaming-like on-device Android SpeechRecognizer with partial transcription, voice stop command and optional system speech consent.
+- Spoken command «وزع المهام» and one-tap distribution, plus explicit date extraction and editable due/follow-up dates.
+- Conservative per-task workspace routing, never default to View; manual confirmation on ambiguous cases.
+- No automatic API upload of projects; explicit toggle allows project-name context if requested.
+- Manual task editor requires explicit workspace; never assumes the first workspace.
+- New routing/voice/date unit tests; versionCode 5, same app ID and database schema.
+- See `UPDATE_V04_AR.md` for testing and signing caveats.
+
 # Changelog
 
 ## 0.3.0 — fixes release

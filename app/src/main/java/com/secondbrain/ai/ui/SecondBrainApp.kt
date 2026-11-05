@@ -23,6 +23,8 @@ import kotlinx.coroutines.launch
 import com.secondbrain.ai.ai.ApiKeyVault
 import com.secondbrain.ai.ai.BudgetGuard
 import com.secondbrain.ai.ai.SmartApiClient
+import com.secondbrain.ai.ai.WorkspaceRouter
+import com.secondbrain.ai.ai.SuggestedDateTime
 import org.json.JSONObject
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -38,6 +40,8 @@ import com.secondbrain.ai.data.*
 import com.secondbrain.ai.util.ReminderScheduler
 import java.text.SimpleDateFormat
 import java.time.LocalDate
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.time.ZoneId
 import java.util.Date
 import java.util.Locale
@@ -84,9 +88,16 @@ private fun pickDateTime(context: Context, initial: Long?, onPicked: (Long) -> U
 }
 
 @Composable
-fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean, onRecord: () -> Unit,
+fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean,
+                   dictationText: String, dictationPartial: String, dictationListening: Boolean,
+                   dictationNotice: String, distributeRequests: Int,
+                   onDictationChange: (String) -> Unit, onDictationToggle: () -> Unit,
+                   onQueueDistribution: () -> Unit,
+                   onRecord: () -> Unit,
                    onAttach: (String) -> Unit, onShare: (String) -> Unit, onBackup: () -> Unit,
-                   onOpenAttachment: (AttachmentInfo) -> Unit, lockEnabled: Boolean, onLockToggle: (Boolean) -> Unit) {
+                   onOpenAttachment: (AttachmentInfo) -> Unit, lockEnabled: Boolean, onLockToggle: (Boolean) -> Unit,
+                   onReminderTest: () -> Unit, onReminderMinute: () -> Unit,
+                   onNotificationSettings: () -> Unit, onExactAlarmSettings: () -> Unit) {
     var screen by remember { mutableStateOf("home") }
     val smartClient=remember { SmartApiClient(db.contextForScheduler()) }
     var revision by remember { mutableIntStateOf(0) }
@@ -126,7 +137,7 @@ fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean, onRecord
                     }
                     when(screen) {
                         "home" -> HomeScreen(tasks,workspaces,projects,smartMode,onMode={smartMode=it;prefs.edit().putBoolean("smart_mode",it).apply()},
-                            onCreate={creatingTask=true},onRecord=onRecord,recording=recording,
+                            onCreate={creatingTask=true},onRecord={screen="assistant";onDictationToggle()},recording=dictationListening,
                             onTask={editor=it},onWorkspace={activeWorkspace=it;screen="tasks"},onReports={screen="reports"},onAssistant={screen="assistant"})
                         "workspaces" -> WorkspaceScreen(workspaces,projects,tasks,onSelect={activeWorkspace=it;screen="tasks"},
                             onNew={newWorkspace=true},onProject={newProjectIn=it})
@@ -135,8 +146,15 @@ fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean, onRecord
                             onNewProject={newProjectIn=if(activeWorkspace=="all") "" else activeWorkspace},
                             onNewTopic={newTopicIn=""})
                         "reports" -> ReportScreen(db,workspaces,tasks,projects,revision,onRefresh={reload()},onShare=onShare,smartMode=smartMode,api=smartClient)
-                        "assistant" -> AssistantScreen(db,smartMode,smartClient,onSaved={reload()},onGoSettings={screen="settings"})
-                        "settings" -> SettingsScreen(db,smartMode,onToggle={smartMode=it;prefs.edit().putBoolean("smart_mode",it).apply()},onBackup=onBackup,onAssistant={screen="assistant"},lockEnabled=lockEnabled,onLockToggle=onLockToggle)
+                        "assistant" -> AssistantScreen(db,smartMode,smartClient,onSaved={reload()},onGoSettings={screen="settings"},
+                            text=dictationText,partial=dictationPartial,listening=dictationListening,
+                            notice=dictationNotice,distributeRequests=distributeRequests,
+                            onTextChange=onDictationChange,onDictationToggle=onDictationToggle,
+                            onQueueDistribution=onQueueDistribution,
+                            onRecordClip=onRecord,recordingClip=recording)
+                        "settings" -> SettingsScreen(db,smartMode,onToggle={smartMode=it;prefs.edit().putBoolean("smart_mode",it).apply()},onBackup=onBackup,onAssistant={screen="assistant"},lockEnabled=lockEnabled,onLockToggle=onLockToggle,
+                            onReminderTest=onReminderTest,onReminderMinute=onReminderMinute,
+                            onNotificationSettings=onNotificationSettings,onExactAlarmSettings=onExactAlarmSettings)
                     }
                 }
             }
@@ -240,7 +258,7 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
                 }
                 LineButton("✧ محادثة",onAssistant)
             }
-            Text(if(recording)"جارٍ التسجيل — اضغط مرة أخرى للإيقاف" else "تسجيل صوتي محلي بدون اتصال سحابي",fontSize=10.sp,color=MUTED,
+            Text(if(recording)"جارٍ الإملاء المباشر — تحدث وسيظهر النص" else "إملاء مباشر؛ اقرأ النص ثم وزّع المهام",fontSize=10.sp,color=MUTED,
                 modifier=Modifier.fillMaxWidth(),textAlign=TextAlign.Center)
         }
         Spacer(Modifier.height(21.dp));Heading("مساحات العمل")
@@ -331,7 +349,7 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
     onDismiss:()->Unit,onSave:(BrainTask)->Unit,onAttach:(String)->Unit,onDelete:(String)->Unit,history:List<String>,attachments:List<AttachmentInfo>,
     onOpenAttachment:(AttachmentInfo)->Unit,onDeleteAttachment:(AttachmentInfo)->Unit){
     var title by remember(task?.id){mutableStateOf(task?.title?:"")};var details by remember(task?.id){mutableStateOf(task?.description?:"")}
-    var workspace by remember(task?.id){mutableStateOf(task?.workspaceId?:workspaces.firstOrNull()?.id.orEmpty())}
+    var workspace by remember(task?.id){mutableStateOf(task?.workspaceId.orEmpty())}
     var project by remember(task?.id){mutableStateOf(task?.projectId?:"")};var topic by remember(task?.id){mutableStateOf(task?.topicId?:"")}
     var status by remember(task?.id){mutableStateOf(task?.status?:"todo")};var priority by remember(task?.id){mutableStateOf(task?.priority?:"normal")}
     var owner by remember(task?.id){mutableStateOf(task?.owner?:"")};var due by remember(task?.id){mutableStateOf(task?.dueAt)}
@@ -344,7 +362,7 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
             Heading(if(task==null)"إضافة مهمة جديدة" else "تعديل ومتابعة المهمة")
             OutlinedTextField(title,{title=it},Modifier.fillMaxWidth(),label={Text("عنوان المهمة *")},singleLine=true)
             OutlinedTextField(details,{details=it},Modifier.fillMaxWidth(),label={Text("التفاصيل وآخر المستجدات")},minLines=2,maxLines=5)
-            Text("مساحة العمل",color=MUTED,fontSize=12.sp)
+            Text("مساحة العمل — اختيار مطلوب",color=if(workspace.isBlank())GOLD_PALE else MUTED,fontSize=12.sp)
             LazyRow(horizontalArrangement=Arrangement.spacedBy(6.dp)){items(workspaces){w->FilterChip(workspace==w.id,{workspace=w.id;project="";topic=""},label={Text(w.name,fontSize=11.sp)})}}
             val possibleProjects=projects.filter{it.workspaceId==workspace}
             if(possibleProjects.isNotEmpty()){
@@ -387,6 +405,7 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 GoldButton("حفظ",{
                     if(title.isBlank())error="عنوان المهمة مطلوب"
+                    else if(workspace.isBlank())error="اختر مساحة العمل؛ لن يتم وضع المهمة في فيو تلقائيًا"
                     else onSave(BrainTask(
                     id=task?.id?:UUID.randomUUID().toString(),title=title.trim(),description=details,
                     workspaceId=workspace,projectId=project,topicId=topic,status=status,priority=priority,
@@ -517,7 +536,9 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
 }
 
 @Composable private fun SettingsScreen(db:BrainDatabase,smart:Boolean,onToggle:(Boolean)->Unit,onBackup:()->Unit,onAssistant:()->Unit,
-    lockEnabled:Boolean,onLockToggle:(Boolean)->Unit){
+    lockEnabled:Boolean,onLockToggle:(Boolean)->Unit,
+    onReminderTest:()->Unit,onReminderMinute:()->Unit,
+    onNotificationSettings:()->Unit,onExactAlarmSettings:()->Unit){
     val ctx=db.contextForScheduler()
     val vault=remember{ApiKeyVault(ctx)}
     val budget=remember{BudgetGuard(ctx)}
@@ -537,6 +558,29 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
             Text(if(smart)"تُرسل المعلومات فقط عند ضغط أمر تحليل أو محادثة أو تفريغ صوت." else "لن يرسل الوضع العادي أي طلبات إلى API.",fontSize=12.sp,color=GOLD_PALE)
             Spacer(Modifier.height(8.dp))
             GoldButton("✦ فتح المساعد الذكي",onAssistant,Modifier.fillMaxWidth())
+        }
+        Spacer(Modifier.height(13.dp))
+        Panel(Modifier.fillMaxWidth()) {
+            Text("🔔 التنبيهات والتذكيرات",fontWeight=FontWeight.Bold,fontSize=17.sp,color=GOLD_PALE)
+            val notificationsAllowed = ReminderScheduler.notificationsAllowed(ctx)
+            val exactAllowed = ReminderScheduler.exactAllowed(ctx)
+            val channelSound = ReminderScheduler.channelSoundEnabled(ctx)
+            Text(if(notificationsAllowed) "✓ إذن الإشعارات مفعّل" else "⚠ الإشعارات غير مفعّلة — اسمح بها من إعدادات الهاتف",
+                color=if(notificationsAllowed)GREEN else RED,fontSize=12.sp)
+            Text(if(channelSound) "✓ صوت قناة التنبيه متاح" else "⚠ صوت القناة مكتوم — افتح إعدادات الصوت",
+                color=if(channelSound)GREEN else RED,fontSize=12.sp)
+            Text(if(exactAllowed) "✓ مواعيد التنبيه الدقيقة مفعّلة" else "⚠ المواعيد تقريبية — اسمح بالمنبهات والتذكيرات للحصول على دقة أعلى",
+                color=if(exactAllowed)GREEN else GOLD_PALE,fontSize=12.sp)
+            Spacer(Modifier.height(8.dp))
+            GoldButton("🔔 اختبار إشعار وصوت الآن",onReminderTest,Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            LineButton("⏱ اختبار بعد دقيقة (حتى والشاشة مغلقة)",onReminderMinute,Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            LineButton("⚙ إعدادات الإشعارات والصوت",onNotificationSettings,Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            if(!exactAllowed) LineButton("⏰ السماح بالمواعيد الدقيقة",onExactAlarmSettings,Modifier.fillMaxWidth())
+            Text("تنبيه: الإشعارات المحلية مجانية ولا تحتاج API. تأكد أن المهمة لها موعد استحقاق أو متابعة في المستقبل؛ بعض أوضاع توفير البطارية تؤخر تنبيهات أندرويد.",
+                color=MUTED,fontSize=11.sp)
         }
         Spacer(Modifier.height(13.dp))
         Panel(Modifier.fillMaxWidth()){
@@ -592,106 +636,249 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
     }
 }
 
-@Composable private fun AssistantScreen(db:BrainDatabase,smart:Boolean,api:SmartApiClient,onSaved:()->Unit,onGoSettings:()->Unit){
-    var text by remember { mutableStateOf("") }
+
+/** Each AI proposal has its OWN classification, never inherits the chat's workspace. */
+private data class AssistantProposal(
+    val task: BrainTask,
+    val needsWorkspaceChoice: Boolean,
+    val routingMessage: String
+)
+
+@Composable
+private fun AssistantScreen(
+    db: BrainDatabase,
+    smart: Boolean,
+    api: SmartApiClient,
+    onSaved: () -> Unit,
+    onGoSettings: () -> Unit,
+    text: String,
+    partial: String,
+    listening: Boolean,
+    notice: String,
+    distributeRequests: Int,
+    onTextChange: (String) -> Unit,
+    onDictationToggle: () -> Unit,
+    onQueueDistribution: () -> Unit,
+    onRecordClip: () -> Unit,
+    recordingClip: Boolean
+) {
     var answer by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
-    var proposed by remember { mutableStateOf<List<BrainTask>>(emptyList()) }
-    var selectedSpace by remember { mutableStateOf("view") }
+    var proposed by remember { mutableStateOf<List<AssistantProposal>>(emptyList()) }
+    var chatWorkspace by remember { mutableStateOf("") }
+    var includeProjectNames by remember { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
     val spaces=remember { db.workspaces() }
-    val keyReady=remember { ApiKeyVault(db.contextForScheduler()).exists() }
-    val lastVoice=remember { db.voiceDir().listFiles()?.filter { it.isFile&&it.extension.lowercase()=="m4a" }?.maxByOrNull { it.lastModified() } }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(17.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-        Heading("المساعد التنفيذي الذكي", "AI عند طلبك فقط")
+    val projects=remember { db.projects() }
+    val ctx=LocalContext.current
+    val keyReady=remember { ApiKeyVault(ctx).exists() }
+    val lastVoice=remember(recordingClip) { db.voiceDir().listFiles()
+        ?.filter { it.isFile && it.extension.lowercase()=="m4a" }
+        ?.maxByOrNull { it.lastModified() } }
+    var handledDistribute by remember { mutableIntStateOf(distributeRequests) }
+
+    fun updateProposal(index: Int, transform: (AssistantProposal) -> AssistantProposal) {
+        proposed=proposed.mapIndexed { i,p -> if (i==index) transform(p) else p }
+    }
+
+    fun extract(focusDates: Boolean = false) {
+        if(loading) return
+        if(!smart){error="شغّل الوضع الذكي لتوزيع الكلام تلقائيًا، أو أضف مهمة يدويًا في الوضع العادي";return}
+        val source=text.trim()
+        if(source.isEmpty()){error="اكتب أو أملِ الكلام أولًا";return}
+        loading=true;error="";answer="";proposed=emptyList()
+        scope.launch {
+            try {
+                val contextProjects=if(includeProjectNames) projects.take(70).joinToString("\n") {
+                    "${it.id} | ${it.name} | workspace=${it.workspaceId}"
+                } else "لا توجد قائمة مشاريع مصرح بمشاركتها؛ اجعل project_id فارغًا دائمًا"
+                val instructions="""
+                    أنت محلل مهام شخصي، يُدخل المستخدم أحيانًا أكثر من موضوع في جملة واحدة.
+                    أرجع JSON فقط بلا Markdown: {"tasks":[{"title":"","description":"","workspace_id":"","project_id":"","status":"todo","priority":"normal","owner":"","due_date":"","follow_up_date":""}],"summary":""}
+                    افصل كل طلب مستقل؛ لا تحول معلومات سابقة أو كلامًا عابرًا إلى مهام إلا إذا كان مطلوبًا تنفيذه.
+                    صنّف كل مهمة *بشكل مستقل* حسب محتواها، وليس حسب المساحة الحالية أو المهمة السابقة.
+                    المساحات المسموحة: view = فيو المتحدة والمشروعات المعروفة بالشركة؛ personal = البيت والأسرة والمواعيد الشخصية؛ tech = QuantEx/GitHub والتطبيقات؛ consult = الاستشارات والعمل الخاص.
+                    ممنوع وضع مهام المنزل أو الأسرة في view؛ عندما لا يتضح السياق اترك workspace_id فارغًا، ولا تختر view بالتخمين.
+                    project_id يساوي معرّف مشروع من القائمة فقط إن كان واضحًا والقائمة متاحة بإذن المستخدم، وإلا فارغًا.
+                    المشاريع المحلية (معرف | اسم | مساحة):
+                    $contextProjects
+                    الحالات: todo,progress,wait,approval,blocked,done. الأولوية: low,normal,high,critical.
+                    استخرج مواعيد التنفيذ والمتابعة من الأوامر مثل بكرة والأحد الساعة 11؛ أرجع ISO محلي YYYY-MM-DDTHH:mm.
+                    لا تخترع مواعيد أو أيام؛ عند عدم ذكر وقت في تاريخ محدد افترض 09:00 صباحًا، ولا تحدد تاريخًا إن لم يذكر.
+                    ${if(focusDates) "اهتم بشكل خاص بالتواريخ والأوقات المكتوبة أو المنطوقة، لكن لا تخمن مواعيد غير مذكورة." else "وزع المهام حسب المشروع والشخص والمواعيد المذكورة."}
+                    اليوم ${LocalDate.now()} والوقت المحلي ${ZonedDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)}.
+                    حد أقصى 8 مهام، وأبقِ الوصف موجزًا. كل معلومة غير مؤكدة تكون فارغة.
+                """.trimIndent()
+                val raw=api.ask(source.take(4500),instructions=instructions,maxOutputTokens=2200)
+                val json=JSONObject(raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim())
+                val arr=json.optJSONArray("tasks")
+                val proposals=mutableListOf<AssistantProposal>()
+                if(arr!=null) for(i in 0 until minOf(arr.length(),8)) {
+                    val x=arr.optJSONObject(i)?:continue
+                    val title=x.optString("title").trim().take(120)
+                    if(title.isEmpty())continue
+                    val detail=x.optString("description").trim().take(1600)
+                    val modelSpace=x.optString("workspace_id").trim()
+                    val route=WorkspaceRouter.route("$title $detail",modelSpace,spaces.map {it.id}.toSet())
+                    val project=projects.firstOrNull { it.id==x.optString("project_id") && it.workspaceId==route.workspaceId }
+                    val status=x.optString("status").takeIf{it in TaskStatus.labels}?:"todo"
+                    val priority=x.optString("priority").takeIf{it in TaskPriority.labels}?:"normal"
+                    val task=BrainTask(
+                        id=UUID.randomUUID().toString(),title=title,description=detail,
+                        workspaceId=route.workspaceId.orEmpty(),projectId=project?.id.orEmpty(),
+                        status=status,priority=priority,owner=x.optString("owner").take(120),
+                        dueAt=SuggestedDateTime.parse(x.optString("due_date")),
+                        followUpAt=SuggestedDateTime.parse(x.optString("follow_up_date"))
+                    )
+                    proposals.add(AssistantProposal(task,route.needsReview,route.reason))
+                }
+                proposed=proposals
+                answer=json.optString("summary")
+                if(proposals.isEmpty()) error="لم يتم استخراج مهام قابلة للتنفيذ؛ عدل الكلام وحاول مجددًا."
+            } catch(e:Exception) {error=e.message.orEmpty()}
+            finally{loading=false}
+        }
+    }
+
+    LaunchedEffect(distributeRequests) {
+        if(distributeRequests>handledDistribute) {
+            handledDistribute=distributeRequests
+            extract()
+        }
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(17.dp),
+        verticalArrangement=Arrangement.spacedBy(12.dp)) {
+        Heading("المساعد التنفيذي الذكي", "تحدث مباشرة ← راجع الكلام ← وزّع المهام")
         Panel(Modifier.fillMaxWidth()) {
-            Text("خصوصية وتحكم",fontWeight=FontWeight.Bold,color=GOLD_PALE)
-            Text("يتم إرسال النص الذي تختاره فقط عند الضغط على زر التحليل. كل المهام والنتائج تُحفظ على الجهاز؛ لا ترفع قاعدة البيانات أو الملفات تلقائيًا.",color=MUTED,fontSize=11.sp)
-            if(!smart) Text("الوضع العادي مفعل: شغّل الوضع الذكي أولًا.",color=GOLD,fontSize=12.sp)
-            if(!keyReady) LineButton("ضبط مفتاح API",onGoSettings)
+            Text("إملاء فوري — الكلام يظهر أثناء التحدث",fontWeight=FontWeight.Bold,color=GOLD_PALE,fontSize=14.sp)
+            Text("الزر الرئيسي يستخدم محرك التعرف على الكلام في الهاتف، بدون رفع تسجيل إلى API التطبيق. إن لم يتوفر محرك محلي سنطلب موافقتك قبل استخدام محرك النظام الذي قد يحتاج إنترنت.",color=MUTED,fontSize=11.sp)
+            Spacer(Modifier.height(10.dp))
+            GoldButton(if(listening) "■ أنهِ الإملاء" else "🎙 ابدأ الكلام المباشر",{
+                if(recordingClip)error="أنه تسجيل المقطع المحفوظ أولًا قبل الإملاء المباشر"
+                else onDictationToggle()
+            },Modifier.fillMaxWidth())
+            if(listening) Text("نتابع كلامك الآن؛ الكلمات غير النهائية تظهر داخل مربع النص ثم تُثبت عند اكتمال الجملة.",color=GREEN,fontSize=11.sp)
+            if(notice.isNotBlank()) Text(notice,color=GOLD_PALE,fontSize=11.sp)
+            if(recordingClip) Text("يُحفظ تسجيل صوتي منفصل الآن؛ أوقفه من الزر أدناه.",color=MUTED,fontSize=11.sp)
         }
-        Text("مساحة العمل المقترحة للمهام الجديدة",color=MUTED,fontSize=12.sp)
+        OutlinedTextField(
+            value=if(partial.isBlank())text else listOf(text,partial).filter{it.isNotBlank()}.joinToString(" "),
+            onValueChange=onTextChange,
+            readOnly=listening,
+            modifier=Modifier.fillMaxWidth().heightIn(min=160.dp),
+            label={Text("كلامك مكتوب هنا — عدّله قبل التوزيع")},
+            placeholder={Text("مثال: فكرني بكرة 9 صباحًا أجيب حاجات للبيت، والأحد 11 أتابع استشاري برج فيو...")},
+            minLines=5
+        )
+        Text("تقدر تقول في نهاية كلامك «وزّع المهام»، أو تضغط الزر بعد المراجعة.",color=MUTED,fontSize=11.sp)
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("إرسال أسماء مشروعاتي للمساعد عند التوزيع",color=TEXT,fontSize=11.sp)
+                Text("اختياري ومغلق افتراضيًا؛ عند تفعيله تُرسل أسماء حتى 70 مشروعًا مع النص لتحسين الربط، بدون مرفقات.",color=MUTED,fontSize=10.sp)
+            }
+            Switch(checked=includeProjectNames,onCheckedChange={includeProjectNames=it})
+        }
+        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            GoldButton(if(loading)"جارٍ التوزيع..." else "✦ وزّع المهام",{
+                if(listening) onQueueDistribution() else extract(false)
+            },Modifier.weight(1f))
+            LineButton("📅 استخرج المواعيد",{
+                if(listening) error="أنهِ الإملاء أولًا لتثبيت آخر الكلمات، ثم اضغط استخراج المواعيد"
+                else extract(true)
+            },Modifier.weight(1f))
+        }
+        if(loading) LinearProgressIndicator(Modifier.fillMaxWidth(),color=GOLD)
+        if(!smart)Text("الوضع العادي: الإملاء المباشر ممكن إذا دعمه الهاتف؛ التوزيع والمواعيد الذكية تحتاج الوضع الذكي.",color=GOLD_PALE,fontSize=11.sp)
+        if(error.isNotBlank())Text(error,color=RED,fontSize=12.sp)
+        if(proposed.isNotEmpty()) Panel(Modifier.fillMaxWidth()) {
+            Heading("راجع كل مهمة ومساحتها", "${proposed.size} مهام — لن يُحفظ أي بند بلا مساحة واضحة")
+            proposed.forEachIndexed { index,proposal ->
+                val t=proposal.task
+                Column(Modifier.fillMaxWidth().padding(vertical=9.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+                    OutlinedTextField(t.title,{v->updateProposal(index){it.copy(task=it.task.copy(title=v.take(120))) }},
+                        Modifier.fillMaxWidth(),label={Text("عنوان المهمة")},singleLine=true)
+                    if(proposal.needsWorkspaceChoice || t.workspaceId.isBlank())
+                        Text("⚠ ${proposal.routingMessage}",color=GOLD_PALE,fontSize=11.sp)
+                    Text("مساحة هذه المهمة (مستقلة عن باقي المهام):",color=MUTED,fontSize=11.sp)
+                    LazyRow(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                        items(spaces) { w ->
+                            FilterChip(t.workspaceId==w.id && !proposal.needsWorkspaceChoice,{
+                                updateProposal(index){old -> old.copy(
+                                    task=old.task.copy(workspaceId=w.id,projectId="",topicId=""),
+                                    needsWorkspaceChoice=false,routingMessage="تم اختيار المساحة يدويًا")}
+                            },label={Text(w.name,fontSize=10.sp)})
+                        }
+                    }
+                    val possibleProjects=projects.filter{it.workspaceId==t.workspaceId}
+                    if(possibleProjects.isNotEmpty()) {
+                        Text("المشروع (اختياري):",color=MUTED,fontSize=11.sp)
+                        LazyRow(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                            item { FilterChip(t.projectId.isEmpty(),{updateProposal(index){it.copy(task=it.task.copy(projectId=""))}},label={Text("عام")}) }
+                            items(possibleProjects) { p -> FilterChip(t.projectId==p.id,
+                                {updateProposal(index){it.copy(task=it.task.copy(projectId=p.id))}},
+                                label={Text(p.name,fontSize=10.sp)}) }
+                        }
+                    }
+                    Row(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=Alignment.CenterVertically) {
+                        Text("${TaskStatus.label(t.status)} • ${TaskPriority.label(t.priority)}",color=MUTED,fontSize=11.sp)
+                    }
+                    DateTimeField("تاريخ التنفيذ / الاستحقاق",t.dueAt,
+                        {pickDateTime(ctx,t.dueAt){d->updateProposal(index){it.copy(task=it.task.copy(dueAt=d))}}},
+                        {updateProposal(index){it.copy(task=it.task.copy(dueAt=null))}})
+                    DateTimeField("موعد المتابعة",t.followUpAt,
+                        {pickDateTime(ctx,t.followUpAt){d->updateProposal(index){it.copy(task=it.task.copy(followUpAt=d))}}},
+                        {updateProposal(index){it.copy(task=it.task.copy(followUpAt=null))}})
+                    if(index<proposed.lastIndex) HorizontalDivider(color=LINE)
+                }
+            }
+            val canSave=proposed.all { !it.needsWorkspaceChoice && it.task.workspaceId.isNotBlank() && it.task.title.isNotBlank() }
+            GoldButton("✓ اعتماد وحفظ ${proposed.size} مهام محليًا",{
+                if(canSave) {
+                    proposed.forEach { item ->db.putTask(item.task);ReminderScheduler.schedule(ctx,item.task)}
+                    proposed=emptyList();answer="تم حفظ المهام في المساحات المحددة محليًا.";onSaved()
+                } else error="راجع المساحات والعناوين غير المؤكدة أولًا"
+            },Modifier.fillMaxWidth())
+            if(!canSave)Text("اختر مساحة لكل مهمة غير مؤكدة؛ لن تُحفظ في فيو تلقائيًا.",color=GOLD_PALE,fontSize=11.sp)
+            LineButton("إلغاء المقترحات",{proposed=emptyList()},Modifier.fillMaxWidth())
+        }
+        if(answer.isNotBlank()) Panel(Modifier.fillMaxWidth()) {
+            Heading("ملخص المساعد")
+            Text(answer,color=TEXT,fontSize=13.sp)
+        }
+        Spacer(Modifier.height(4.dp))
+        Text("المحادثة البحثية — اختر مساحة البحث فقط (لا تؤثر على تصنيف المهام):",color=MUTED,fontSize=11.sp)
         LazyRow(horizontalArrangement=Arrangement.spacedBy(7.dp)) {
-            items(spaces){w ->FilterChip(selectedSpace==w.id,{selectedSpace=w.id},label={Text(w.name,fontSize=11.sp)})}
+            items(spaces){w->FilterChip(chatWorkspace==w.id,{chatWorkspace=w.id},label={Text(w.name,fontSize=11.sp)})}
         }
-        OutlinedTextField(text,{text=it},Modifier.fillMaxWidth().heightIn(min=140.dp),
-            label={Text("اكتب طلبك أو النص المستخرج من التسجيل")},placeholder={Text("تابع مع الاستشاري الأحد وبعت عرض السعر لإبراهيم التويم...")})
-        Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) {
-            LineButton(if(loading)"جارٍ المعالجة..." else "✦ استخرج المهام",{
-                if(!loading&&smart&&text.isNotBlank()) {
-                    loading=true;error="";answer="";proposed=emptyList()
-                    scope.launch{
-                        try {
-                            val raw=api.ask(text.take(4500),instructions="""
-                                أنت نظام استخراج مهام عربية. أرجع كائن JSON فقط بدون Markdown وفق الصيغة:
-                                {"tasks":[{"title":"","description":"","status":"todo","priority":"normal","owner":"","due_date":"YYYY-MM-DD","follow_up_date":"YYYY-MM-DD"}],"summary":""}.
-                                استخرج ما يصل إلى 8 مهام مختلفة. الحالات المسموحة todo,progress,wait,approval,blocked,done.
-                                لا تختلق مواعيد أو أسماء؛ ترك الحقول غير المؤكدة فارغة. تواريخ نسبية بالاعتماد على تاريخ اليوم الحالي.
-                                التاريخ المحلي اليوم ${LocalDate.now()}.
-                            """.trimIndent())
-                            val json=JSONObject(raw.removePrefix("```json").removePrefix("```").removeSuffix("```").trim())
-                            val arr=json.optJSONArray("tasks")
-                            val output=mutableListOf<BrainTask>()
-                            if(arr!=null)for(i in 0 until minOf(arr.length(),8)){
-                                val x=arr.optJSONObject(i)?:continue
-                                val title=x.optString("title").trim().take(120)
-                                if(title.isEmpty())continue
-                                val status=x.optString("status").takeIf{it in TaskStatus.labels}?:"todo"
-                                val priority=x.optString("priority").takeIf{it in listOf("low","normal","high","critical")}?:"normal"
-                                output.add(BrainTask(id=UUID.randomUUID().toString(),title=title,description=x.optString("description").take(1500),
-                                    workspaceId=selectedSpace,status=status,priority=priority,owner=x.optString("owner").take(120),
-                                    dueAt=fromIso(x.optString("due_date")),followUpAt=fromIso(x.optString("follow_up_date"))))
-                            }
-                            proposed=output;answer=json.optString("summary")
-                            if(output.isEmpty())error="لم تُستخرج مهام مؤكدة؛ يمكنك تعديل النص والمحاولة مرة أخرى."
-                        }catch(e:Exception){error=e.message.orEmpty()}
-                        finally{loading=false}
-                    }
+        LineButton(if(loading)"جارٍ الرد..." else "اسأل المساعد عن هذه المساحة",{
+            if(chatWorkspace.isBlank()) error="اختر مساحة البحث أولًا حتى لا تختلط بيانات البيت بفيو"
+            else if(!loading && smart && text.isNotBlank()){
+                loading=true;error="";proposed=emptyList()
+                scope.launch{
+                    try{
+                        val relevant=db.tasks().filter{it.workspaceId==chatWorkspace}.take(25)
+                            .joinToString("\n"){"${it.title} | ${TaskStatus.label(it.status)} | ${it.owner.take(40)} | ${iso(it.dueAt)}"}.take(4500)
+                        answer=api.ask(text.take(3000),relevant)
+                    }catch(e:Exception){error=e.message.orEmpty()}
+                    finally{loading=false}
                 }
-            },Modifier.weight(1f))
-            GoldButton(if(loading)"جارٍ الرد..." else "المحادثة",{
-                if(!loading&&smart&&text.isNotBlank()) {
-                    loading=true;error="";proposed=emptyList()
-                    scope.launch{
-                        try {
-                            val relevant=db.tasks().filter{it.workspaceId==selectedSpace}.take(25)
-                                .joinToString("\n"){"${it.title} | ${TaskStatus.label(it.status)} | ${it.owner.take(40)} | ${iso(it.dueAt)}"}.take(4500)
-                            answer=api.ask(text.take(3000),relevant)
-                        }catch(e:Exception){error=e.message.orEmpty()}
-                        finally{loading=false}
-                    }
-                }
-            },Modifier.weight(1f))
-        }
-        if(lastVoice!=null) LineButton(if(loading)"جارٍ التفريغ..." else "🎙 تفريغ آخر تسجيل محفوظ إلى نص",{
-            if(!loading&&smart){
+            } else if(!smart) error="فعّل الوضع الذكي أولًا"
+        },Modifier.fillMaxWidth())
+        if(lastVoice!=null) LineButton(if(loading)"جارٍ التفريغ..." else "تفريغ تسجيل محفوظ (اختياري)",{
+            if(!loading && smart){
                 loading=true;error=""
                 scope.launch{
-                    try{text=api.transcribe(lastVoice)}catch(e:Exception){error=e.message.orEmpty()}
+                    try{onTextChange(api.transcribe(lastVoice))}catch(e:Exception){error=e.message.orEmpty()}
                     finally{loading=false}
                 }
             }
         },Modifier.fillMaxWidth())
-        if(!smart) Text("الوضع العادي لا يستخدم API؛ لن يحدث أي اتصال مدفوع.",color=GOLD_PALE,fontSize=12.sp)
-        if(error.isNotBlank()) Text(error,color=RED,fontSize=12.sp)
-        if(answer.isNotBlank())Panel(Modifier.fillMaxWidth()){
-            Heading("رد المساعد")
-            Text(answer,color=TEXT,fontSize=13.sp)
-        }
-        if(proposed.isNotEmpty())Panel(Modifier.fillMaxWidth()) {
-            Heading("مراجعة قبل الحفظ", "${proposed.size} مهام مقترحة")
-            proposed.forEach { task ->
-                Text("• ${task.title}",color=TEXT,fontWeight=FontWeight.Bold,fontSize=13.sp,modifier=Modifier.padding(top=7.dp))
-                Text("${TaskStatus.label(task.status)} | ${iso(task.dueAt).ifBlank { "بدون موعد" }} | ${task.owner}",color=MUTED,fontSize=10.sp)
-            }
-            Spacer(Modifier.height(12.dp))
-            GoldButton("✓ اعتماد وحفظ ${proposed.size} مهام محليًا",{
-                proposed.forEach { t-> db.putTask(t);ReminderScheduler.schedule(db.contextForScheduler(),t) }
-                proposed=emptyList();answer="تم الحفظ في الذاكرة المحلية.";onSaved()
-            },Modifier.fillMaxWidth())
-            LineButton("إلغاء المقترحات",{proposed=emptyList()},Modifier.fillMaxWidth())
-        }
+        LineButton(if(recordingClip)"■ إنهاء حفظ المقطع" else "حفظ مقطع صوتي منفصل (اختياري)",{
+            if(listening)error="أنه الإملاء المباشر قبل تسجيل مقطع صوتي منفصل"
+            else onRecordClip()
+        },Modifier.fillMaxWidth())
         FooterCredit()
     }
 }

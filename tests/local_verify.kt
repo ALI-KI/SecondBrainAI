@@ -1,5 +1,8 @@
 import com.secondbrain.ai.data.*
 import com.secondbrain.ai.util.*
+import com.secondbrain.ai.ai.WorkspaceRouter
+import com.secondbrain.ai.ai.SuggestedDateTime
+import com.secondbrain.ai.voice.VoiceCommand
 fun main() {
  val w=Workspace("view","فيو")
  val p=Project("tower","view","برج")
@@ -14,5 +17,13 @@ fun main() {
  check("متابعة تقرير" in r)
  val snap=Snapshot("id","view","weekly",r,1L,ReportEngine.snapshotItems(listOf(t),"view"))
  check(ReportEngine.compare(snap,listOf(t.copy(status="done"))).changed.size==1)
- println("PASS: 9 planner/history/report assertions")
+ check(WorkspaceRouter.route("اشتري طلبات البيت", "view").workspaceId=="personal")
+ check(WorkspaceRouter.route("متابعة RWDI في برج فيو", "personal").workspaceId=="view")
+ check(WorkspaceRouter.route("أتصل بالمورد الأحد", "view").needsReview)
+ check(WorkspaceRouter.route("إرسال ملف فيو وحاجات البيت", "view").workspaceId==null)
+ check(VoiceCommand.extract("تواصل مع المقاول الأحد وزع المهام") == ("تواصل مع المقاول الأحد" to true))
+ check(VoiceCommand.extract("توزيع المهام الأسبوع القادم").second==false)
+ check(SuggestedDateTime.parse("2026-11-08T11:00",java.time.ZoneId.of("Asia/Riyadh"))!=null)
+ check(SuggestedDateTime.parse("غير محدد")==null)
+ println("PASS: planner/history/report + workspace safety + voice-command assertions")
 }

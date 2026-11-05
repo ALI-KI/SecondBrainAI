@@ -7,5 +7,8 @@ kotlinc \
   "$ROOT/app/src/main/java/com/secondbrain/ai/data/Models.kt" \
   "$ROOT/app/src/main/java/com/secondbrain/ai/data/ReportEngine.kt" \
   "$ROOT/app/src/main/java/com/secondbrain/ai/util/ReminderPlan.kt" \
+  "$ROOT/app/src/main/java/com/secondbrain/ai/ai/WorkspaceRouter.kt" \
+  "$ROOT/app/src/main/java/com/secondbrain/ai/ai/SuggestedDateTime.kt" \
+  "$ROOT/app/src/main/java/com/secondbrain/ai/voice/VoiceCommand.kt" \
   "$ROOT/tests/local_verify.kt" -include-runtime -d "$TMP/checks.jar"
 java -jar "$TMP/checks.jar"

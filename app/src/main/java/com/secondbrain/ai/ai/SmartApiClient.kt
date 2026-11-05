@@ -38,7 +38,7 @@ class SmartApiClient(private val context:Context) {
         }
         return JSONObject(body)
     }
-    suspend fun ask(userText:String,contextSnippet:String="",instructions:String=""):String=withContext(Dispatchers.IO) {
+    suspend fun ask(userText:String,contextSnippet:String="",instructions:String="",maxOutputTokens:Int=900):String=withContext(Dispatchers.IO) {
         ensureSmart()
         require(userText.isNotBlank()){"الرسالة فارغة"}
         val localContext=contextSnippet.take(8500)
@@ -49,7 +49,7 @@ class SmartApiClient(private val context:Context) {
         val json=JSONObject().apply {
             put("model","gpt-6-luna")
             put("store",false) // do not create remote stored conversation state
-            put("max_output_tokens",900)
+            put("max_output_tokens",maxOutputTokens.coerceIn(200,2500))
             put("instructions", if(instructions.isBlank())
                 "أنت مساعد إداري شخصي. أجب بالعربية بإيجاز. استند فقط إلى السياق المرفق؛ إذا لم توجد معلومة قل إنها غير مسجلة. لا تدّع تنفيذ إجراءات." else instructions)
             put("input", buildString {
