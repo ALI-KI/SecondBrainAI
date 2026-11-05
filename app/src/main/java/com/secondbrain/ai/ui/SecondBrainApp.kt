@@ -42,6 +42,11 @@ import java.time.ZoneId
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.Calendar
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
+import android.content.Context
+import androidx.compose.ui.platform.LocalContext
 
 private val BG=Color(0xFF07131D)
 private val PANEL=Color(0xFF0E202D)
@@ -59,9 +64,29 @@ private fun fmt(millis: Long?): String = millis?.let { SimpleDateFormat("dd MMM 
 private fun iso(millis: Long?): String = millis?.let { SimpleDateFormat("yyyy-MM-dd",Locale.US).format(Date(it)) } ?: ""
 private fun fromIso(s: String): Long? = try { LocalDate.parse(s.trim()).atTime(9,0).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli() } catch(_: Exception) { null }
 
+private fun fmtDateTime(millis: Long): String = SimpleDateFormat("EEE dd MMM yyyy • hh:mm a",Locale("ar")).format(Date(millis))
+private fun at9(c: Calendar): Calendar = c.apply{set(Calendar.HOUR_OF_DAY,9);set(Calendar.MINUTE,0);set(Calendar.SECOND,0);set(Calendar.MILLISECOND,0)}
+private fun tomorrowAt9(): Long = at9(Calendar.getInstance().apply{add(Calendar.DAY_OF_YEAR,1)}).timeInMillis
+private fun nextSundayAt9(): Long {
+    val c=at9(Calendar.getInstance())
+    do { c.add(Calendar.DAY_OF_YEAR,1) } while(c.get(Calendar.DAY_OF_WEEK)!=Calendar.SUNDAY)
+    return c.timeInMillis
+}
+/** Native date dialog followed by a native time dialog; returns the chosen instant in local time. */
+private fun pickDateTime(context: Context, initial: Long?, onPicked: (Long) -> Unit) {
+    val base=Calendar.getInstance().apply{timeInMillis=initial?:(System.currentTimeMillis()+3_600_000L)}
+    DatePickerDialog(context,{_,y,m,d->
+        TimePickerDialog(context,{_,h,min->
+            val chosen=Calendar.getInstance().apply{set(y,m,d,h,min,0);set(Calendar.MILLISECOND,0)}
+            onPicked(chosen.timeInMillis)
+        },base.get(Calendar.HOUR_OF_DAY),base.get(Calendar.MINUTE),false).show()
+    },base.get(Calendar.YEAR),base.get(Calendar.MONTH),base.get(Calendar.DAY_OF_MONTH)).show()
+}
+
 @Composable
 fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean, onRecord: () -> Unit,
-                   onAttach: (String) -> Unit, onShare: (String) -> Unit, onBackup: () -> Unit) {
+                   onAttach: (String) -> Unit, onShare: (String) -> Unit, onBackup: () -> Unit,
+                   onOpenAttachment: (AttachmentInfo) -> Unit, lockEnabled: Boolean, onLockToggle: (Boolean) -> Unit) {
     var screen by remember { mutableStateOf("home") }
     val smartClient=remember { SmartApiClient(db.contextForScheduler()) }
     var revision by remember { mutableIntStateOf(0) }
@@ -107,11 +132,11 @@ fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean, onRecord
                             onNew={newWorkspace=true},onProject={newProjectIn=it})
                         "tasks" -> TasksScreen(tasks,workspaces,projects,activeWorkspace,
                             onWorkspace={activeWorkspace=it},onTask={editor=it},onCreate={creatingTask=true},
-                            onNewProject={newProjectIn=if(activeWorkspace=="all") "view" else activeWorkspace},
-                            onNewTopic={newTopicIn=projects.firstOrNull { it.workspaceId==activeWorkspace }?.id ?: projects.firstOrNull()?.id})
+                            onNewProject={newProjectIn=if(activeWorkspace=="all") "" else activeWorkspace},
+                            onNewTopic={newTopicIn=""})
                         "reports" -> ReportScreen(db,workspaces,tasks,projects,revision,onRefresh={reload()},onShare=onShare,smartMode=smartMode,api=smartClient)
                         "assistant" -> AssistantScreen(db,smartMode,smartClient,onSaved={reload()},onGoSettings={screen="settings"})
-                        "settings" -> SettingsScreen(db,smartMode,onToggle={smartMode=it;prefs.edit().putBoolean("smart_mode",it).apply()},onBackup=onBackup,onAssistant={screen="assistant"})
+                        "settings" -> SettingsScreen(db,smartMode,onToggle={smartMode=it;prefs.edit().putBoolean("smart_mode",it).apply()},onBackup=onBackup,onAssistant={screen="assistant"},lockEnabled=lockEnabled,onLockToggle=onLockToggle)
                     }
                 }
             }
@@ -119,11 +144,16 @@ fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean, onRecord
                 onDismiss={creatingTask=false;editor=null},onSave={t->saveTask(t);creatingTask=false;editor=null},
                 onAttach={id->onAttach(id)},
                 history=editor?.let { db.events(it.id) } ?: emptyList(),
-                attachments=editor?.let { db.attachments(it.id).map { f -> f.name } } ?: emptyList(),
+                attachments=editor?.let { db.attachmentInfos(it.id) } ?: emptyList(),
+                onOpenAttachment=onOpenAttachment,onDeleteAttachment={a->db.deleteAttachment(a.id);reload()},
                 onDelete={id->db.deleteTask(id);reload();editor=null})
             if(newWorkspace) NameDialog("مساحة عمل جديدة",onClose={newWorkspace=false},onSave={name ->db.addWorkspace(name);reload();newWorkspace=false})
-            newProjectIn?.let { w -> NameDialog("مشروع جديد",onClose={newProjectIn=null},onSave={name ->db.addProject(name,w);reload();newProjectIn=null}) }
-            newTopicIn?.let { p -> NameDialog("موضوع جديد",onClose={newTopicIn=null},onSave={name ->db.addTopic(name,p);reload();newTopicIn=null}) }
+            newProjectIn?.let { w -> ParentNameDialog("مشروع جديد","المساحة",workspaces.map{it.id to it.name},w,
+                onClose={newProjectIn=null},onSave={name,parent->db.addProject(name,parent);reload();newProjectIn=null}) }
+            newTopicIn?.let { p -> ParentNameDialog("موضوع جديد","المشروع",
+                projects.map{pr->pr.id to ((workspaces.firstOrNull{it.id==pr.workspaceId}?.name?:"")+" › "+pr.name)},p,
+                emptyMessage="أنشئ مشروعًا أولًا، ثم أضف الموضوع إليه.",
+                onClose={newTopicIn=null},onSave={name,parent->db.addTopic(name,parent);reload();newTopicIn=null}) }
         }
     }
 }
@@ -298,13 +328,16 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
 }
 
 @Composable private fun TaskEditor(task:BrainTask?,workspaces:List<Workspace>,projects:List<Project>,topics:List<Topic>,
-    onDismiss:()->Unit,onSave:(BrainTask)->Unit,onAttach:(String)->Unit,onDelete:(String)->Unit,history:List<String>,attachments:List<String>){
+    onDismiss:()->Unit,onSave:(BrainTask)->Unit,onAttach:(String)->Unit,onDelete:(String)->Unit,history:List<String>,attachments:List<AttachmentInfo>,
+    onOpenAttachment:(AttachmentInfo)->Unit,onDeleteAttachment:(AttachmentInfo)->Unit){
     var title by remember(task?.id){mutableStateOf(task?.title?:"")};var details by remember(task?.id){mutableStateOf(task?.description?:"")}
     var workspace by remember(task?.id){mutableStateOf(task?.workspaceId?:workspaces.firstOrNull()?.id.orEmpty())}
     var project by remember(task?.id){mutableStateOf(task?.projectId?:"")};var topic by remember(task?.id){mutableStateOf(task?.topicId?:"")}
     var status by remember(task?.id){mutableStateOf(task?.status?:"todo")};var priority by remember(task?.id){mutableStateOf(task?.priority?:"normal")}
-    var owner by remember(task?.id){mutableStateOf(task?.owner?:"")};var due by remember(task?.id){mutableStateOf(iso(task?.dueAt))}
-    var follow by remember(task?.id){mutableStateOf(iso(task?.followUpAt))}
+    var owner by remember(task?.id){mutableStateOf(task?.owner?:"")};var due by remember(task?.id){mutableStateOf(task?.dueAt)}
+    var follow by remember(task?.id){mutableStateOf(task?.followUpAt)}
+    val context=LocalContext.current
+    var confirmDelete by remember{mutableStateOf(false)}
     var error by remember { mutableStateOf("") }
     Dialog(onDismissRequest=onDismiss){Surface(shape=RoundedCornerShape(21.dp),color=PANEL,modifier=Modifier.fillMaxWidth().heightIn(max=690.dp)) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(18.dp),verticalArrangement=Arrangement.spacedBy(11.dp)) {
@@ -331,11 +364,20 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
             Text("الأولوية",color=MUTED,fontSize=12.sp)
             LazyRow(horizontalArrangement=Arrangement.spacedBy(6.dp)){items(listOf("low" to "منخفضة","normal" to "عادية","high" to "عالية","critical" to "حرجة")){(id,name)->FilterChip(priority==id,{priority=id},label={Text(name)})}}
             OutlinedTextField(owner,{owner=it},Modifier.fillMaxWidth(),label={Text("المسؤول / الشخص المنتظر منه الرد")})
-            OutlinedTextField(due,{due=it},Modifier.fillMaxWidth(),label={Text("موعد الاستحقاق yyyy-MM-dd")},singleLine=true)
-            OutlinedTextField(follow,{follow=it},Modifier.fillMaxWidth(),label={Text("موعد المتابعة yyyy-MM-dd")},singleLine=true)
+            DateTimeField("موعد الاستحقاق",due,{pickDateTime(context,due){due=it}},{due=null})
+            DateTimeField("موعد المتابعة (تذكير)",follow,{pickDateTime(context,follow){follow=it}},{follow=null})
+            LazyRow(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                item{AssistChip({follow=System.currentTimeMillis()+3_600_000L},{Text("تذكير بعد ساعة",fontSize=11.sp)})}
+                item{AssistChip({follow=tomorrowAt9()},{Text("بكرة 9 ص",fontSize=11.sp)})}
+                item{AssistChip({follow=nextSundayAt9()},{Text("الأحد القادم 9 ص",fontSize=11.sp)})}
+            }
             if(task!=null){
                 LineButton("📎 إضافة مرفق من الجهاز",{onAttach(task.id)})
-                if(attachments.isNotEmpty())Text("المرفقات المحلية: ${attachments.joinToString("، ")}",color=MUTED,fontSize=11.sp)
+                attachments.forEach{a->Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                    Text("📎 ${a.name}",color=GOLD_PALE,fontSize=12.sp,maxLines=1,overflow=TextOverflow.Ellipsis,
+                        modifier=Modifier.weight(1f).clickable{onOpenAttachment(a)}.padding(vertical=6.dp))
+                    Text("✕",color=RED,fontSize=16.sp,modifier=Modifier.clickable{onDeleteAttachment(a)}.padding(8.dp))
+                }}
                 if(history.isNotEmpty()){
                     Text("سجل الإجراءات",fontWeight=FontWeight.Bold,color=GOLD)
                     history.take(6).forEach { Text("• $it",color=MUTED,fontSize=11.sp) }
@@ -345,17 +387,51 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 GoldButton("حفظ",{
                     if(title.isBlank())error="عنوان المهمة مطلوب"
-                    else if(due.isNotBlank()&&fromIso(due)==null || follow.isNotBlank()&&fromIso(follow)==null)
-                        error="استخدم التاريخ بصيغة yyyy-MM-dd"
                     else onSave(BrainTask(
                     id=task?.id?:UUID.randomUUID().toString(),title=title.trim(),description=details,
                     workspaceId=workspace,projectId=project,topicId=topic,status=status,priority=priority,
-                    owner=owner,dueAt=fromIso(due),followUpAt=fromIso(follow),createdAt=task?.createdAt?:System.currentTimeMillis()))})
+                    owner=owner,dueAt=due,followUpAt=follow,createdAt=task?.createdAt?:System.currentTimeMillis()))})
                 LineButton("إلغاء",onDismiss)
-                if(task!=null) LineButton("حذف",{onDelete(task.id)})
+                if(task!=null) LineButton("حذف",{confirmDelete=true})
+                if(confirmDelete&&task!=null) AlertDialog(onDismissRequest={confirmDelete=false},title={Text("حذف المهمة؟")},
+                    text={Text("ستُحذف المهمة وسجلها ومرفقاتها من الجهاز نهائيًا.")},
+                    confirmButton={TextButton({onDelete(task.id)}){Text("حذف",color=RED)}},
+                    dismissButton={TextButton({confirmDelete=false}){Text("إلغاء")}},containerColor=PANEL)
             }
         }
     }}
+}
+
+@Composable private fun DateTimeField(label:String,value:Long?,onPick:()->Unit,onClear:()->Unit){
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).border(1.dp,LINE,RoundedCornerShape(12.dp))
+        .clickable(onClick=onPick).padding(horizontal=12.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
+        Column(Modifier.weight(1f)){
+            Text(label,color=MUTED,fontSize=11.sp)
+            Text(if(value==null)"غير محدد — اضغط للاختيار" else fmtDateTime(value),color=if(value==null)MUTED else TEXT,fontSize=13.sp)
+        }
+        if(value!=null)Text("✕",color=RED,fontSize=16.sp,modifier=Modifier.clickable(onClick=onClear).padding(8.dp))
+    }
+}
+
+/** Name + explicit parent (workspace for a project, project for a topic) so nothing is attached to a guess. */
+@Composable private fun ParentNameDialog(title:String,parentLabel:String,parents:List<Pair<String,String>>,initial:String,
+    emptyMessage:String="",onClose:()->Unit,onSave:(String,String)->Unit){
+    var name by remember { mutableStateOf("") }
+    // An explicit chip selection is required unless the caller opened a specific existing parent.
+    var parent by remember(initial) { mutableStateOf(parents.firstOrNull{it.first==initial}?.first ?: "") }
+    AlertDialog(onDismissRequest=onClose,title={Text(title)},containerColor=PANEL,
+        text={
+            if(parents.isEmpty()) Text(emptyMessage.ifBlank{"لا توجد عناصر متاحة."},color=MUTED)
+            else Column(verticalArrangement=Arrangement.spacedBy(10.dp)){
+                OutlinedTextField(name,{name=it},label={Text("الاسم")},singleLine=true)
+                Text("اختر $parentLabel صراحةً قبل الحفظ",color=MUTED,fontSize=12.sp)
+                LazyRow(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                    items(parents){(id,label)->FilterChip(parent==id,{parent=id},label={Text(label,fontSize=11.sp)})}
+                }
+            }
+        },
+        confirmButton={TextButton(enabled=name.isNotBlank()&&parent.isNotBlank(),onClick={onSave(name.trim(),parent)}){Text("حفظ",color=GOLD)}},
+        dismissButton={TextButton(onClick=onClose){Text("إلغاء")}})
 }
 
 @Composable private fun NameDialog(title:String,onClose:()->Unit,onSave:(String)->Unit){
@@ -440,7 +516,8 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
         confirmButton={TextButton(onClick={comparison=null}){Text("إغلاق",color=GOLD)}},containerColor=PANEL)}
 }
 
-@Composable private fun SettingsScreen(db:BrainDatabase,smart:Boolean,onToggle:(Boolean)->Unit,onBackup:()->Unit,onAssistant:()->Unit){
+@Composable private fun SettingsScreen(db:BrainDatabase,smart:Boolean,onToggle:(Boolean)->Unit,onBackup:()->Unit,onAssistant:()->Unit,
+    lockEnabled:Boolean,onLockToggle:(Boolean)->Unit){
     val ctx=db.contextForScheduler()
     val vault=remember{ApiKeyVault(ctx)}
     val budget=remember{BudgetGuard(ctx)}
@@ -448,6 +525,7 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
     var hasKey by remember{mutableStateOf(vault.exists())}
     var keyNotice by remember{mutableStateOf("")}
     val (count,bytes)=remember { db.storageUsage() }
+    val legacyUnmigrated=remember { db.unresolvedLegacyAttachmentCount() }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(17.dp)) {
         Heading("الإعدادات","خصوصيتك أولًا")
         Panel(Modifier.fillMaxWidth()){
@@ -462,10 +540,20 @@ private fun dbContextPreferences(db:BrainDatabase) = db.contextForScheduler().ge
         }
         Spacer(Modifier.height(13.dp))
         Panel(Modifier.fillMaxWidth()){
+            Text("قفل التطبيق",fontWeight=FontWeight.Bold,fontSize=17.sp)
+            Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){
+                Text(if(lockEnabled)"القفل مفعّل" else "القفل غير مفعّل",fontWeight=FontWeight.Bold)
+                Text("بصمة أو رمز الهاتف عند الفتح، وبعد دقيقة من الخروج من التطبيق",color=MUTED,fontSize=11.sp)
+            };Switch(checked=lockEnabled,onCheckedChange=onLockToggle,colors=SwitchDefaults.colors(checkedThumbColor=BG,checkedTrackColor=GOLD))}
+            Text("عند التفعيل تُخفى معاينة التطبيق في قائمة التطبيقات الأخيرة ويُمنع تصوير الشاشة. القفل يحمي فتح التطبيق فقط ولا يشفّر ملفات البيانات.",color=MUTED,fontSize=11.sp)
+        }
+        Spacer(Modifier.height(13.dp))
+        Panel(Modifier.fillMaxWidth()){
             Text("التخزين المحلي",fontWeight=FontWeight.Bold,fontSize=17.sp)
             Text("الموقع: ${db.rootFolder().absolutePath}",fontSize=10.sp,color=MUTED)
             Text("عدد الملفات: $count • الحجم: ${"%.2f".format(bytes/1048576.0)} MB",fontSize=12.sp)
-            Text("البيانات في ملف SQLite داخل مساحة التطبيق، والمرفقات في مجلدات Voice وAttachments.",fontSize=12.sp,color=MUTED)
+            Text("البيانات في ملف SQLite داخل مساحة التطبيق الخاصة، والمرفقات والتسجيلات في مجلدي Attachments وVoice داخلها (لا تظهر في تطبيق الملفات). للوصول إليها أنشئ نسخة ZIP.",fontSize=12.sp,color=MUTED)
+            if(legacyUnmigrated>0) Text("تنبيه: يوجد $legacyUnmigrated مرفقات قديمة لم يكتمل نقلها. احتفظ بالنسخة القديمة من البيانات حتى تراجع هذه الملفات.",fontSize=12.sp,color=RED)
             Text("لا تشفير إضافيًا لبياناتك، ولا سحابة، والنسخ الاحتياطي التلقائي معطّل. يتم حذف مساحة التطبيق عند إزالته.",fontSize=11.sp,color=MUTED)
             Spacer(Modifier.height(8.dp))
             LineButton("↓ إنشاء نسخة ZIP محلية بدون تشفير",onBackup,Modifier.fillMaxWidth())

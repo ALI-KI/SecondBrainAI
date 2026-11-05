@@ -22,3 +22,31 @@ object TaskStatus {
     fun label(status: String) = labels[status] ?: status
     fun isOpen(status: String) = status != "done" && status != "cancelled"
 }
+
+data class AttachmentInfo(val id: String, val taskId: String, val name: String, val path: String, val mime: String)
+
+object TaskPriority {
+    val labels = linkedMapOf("low" to "منخفضة", "normal" to "عادية", "high" to "عالية", "critical" to "حرجة")
+    fun label(priority: String) = labels[priority] ?: priority
+}
+
+/** Pure Kotlin: describes only real changes between two versions of a task (used for the history log). */
+object TaskChanges {
+    private fun stamp(ms: Long?): String = ms?.let {
+        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.US).format(java.util.Date(it))
+    } ?: "غير محدد"
+    private fun dash(s: String) = s.ifBlank { "—" }
+
+    fun describe(old: BrainTask, new: BrainTask): List<String> {
+        val out = mutableListOf<String>()
+        if (old.status != new.status) out += "الحالة: ${TaskStatus.label(old.status)} ← ${TaskStatus.label(new.status)}"
+        if (old.title != new.title) out += "تعديل العنوان"
+        if (old.owner != new.owner) out += "المسؤول: ${dash(old.owner)} ← ${dash(new.owner)}"
+        if (old.dueAt != new.dueAt) out += "الاستحقاق: ${stamp(old.dueAt)} ← ${stamp(new.dueAt)}"
+        if (old.followUpAt != new.followUpAt) out += "المتابعة: ${stamp(old.followUpAt)} ← ${stamp(new.followUpAt)}"
+        if (old.priority != new.priority) out += "الأولوية: ${TaskPriority.label(old.priority)} ← ${TaskPriority.label(new.priority)}"
+        if (old.workspaceId != new.workspaceId || old.projectId != new.projectId || old.topicId != new.topicId) out += "نقل إلى مساحة/مشروع/موضوع آخر"
+        if (old.description != new.description) out += "تحديث التفاصيل"
+        return out
+    }
+}
