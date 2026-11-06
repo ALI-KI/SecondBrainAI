@@ -16,6 +16,8 @@ import com.secondbrain.ai.util.ReminderScheduler
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -65,6 +67,11 @@ class MainActivity:ComponentActivity(){
     private var distributeRequests by mutableIntStateOf(0)
     private var distributeAfterStop = false
     private var speechController: LiveSpeechController? = null
+    private var fallbackAudioRecorder: MediaRecorder? = null
+    private var fallbackAudioFile: File? = null
+    private var fallbackAudioRecording by mutableStateOf(false)
+    private var fallbackPromptShowing = false
+    private var fallbackPendingPermission = false
     private var recorder:MediaRecorder?=null
     private var voiceFile:File?=null
     private var attachTarget:String?=null
@@ -89,7 +96,10 @@ class MainActivity:ComponentActivity(){
         if(ok)startRecording() else message("يلزم إذن الميكروفون لتسجيل الصوت")
     }
     private val dictationPermission=registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if(ok) beginDictation() else dictationNotice="اسمح للميكروفون بالإملاء الفوري من إعدادات أندرويد"
+        if(ok) {
+            if (fallbackPendingPermission) startFallbackAudioRecording() else beginDictation()
+        } else dictationNotice="اسمح للميكروفون بالإملاء الفوري من إعدادات أندرويد"
+        fallbackPendingPermission=false
     }
     private val notificationPermission=registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if(ok) ReminderScheduler.rescheduleAll(this)
@@ -124,10 +134,11 @@ class MainActivity:ComponentActivity(){
             if(lockEnabled&&!unlocked) LockScreen(onUnlock={requestCredential("unlock")})
             else SecondBrainApp(db=db,trigger=refreshTrigger,recording=recording,
                 dictationText=dictationText,dictationPartial=dictationPartial,
-                dictationListening=dictationListening,dictationNotice=dictationNotice,
+                dictationListening=dictationListening,dictationFallbackRecording=fallbackAudioRecording,dictationNotice=dictationNotice,
                 distributeRequests=distributeRequests,
                 onDictationChange={dictationText=it;dictationPartial=""},
                 onDictationToggle={toggleDictation()},
+                onFallbackRecordToggle={if(fallbackAudioRecording)stopFallbackAudioRecording() else requestFallbackAudioRecording()},
                 onQueueDistribution={queueDistribution()},
                 onRecord={toggleRecording()},onAttach={id->attachTarget=id;filePicker.launch(arrayOf("*/*"))},
                 onShare={text->
@@ -252,6 +263,7 @@ class MainActivity:ComponentActivity(){
 
     // ---- live speech -> editable text -> task distribution ----
     private fun toggleDictation() {
+        if(fallbackAudioRecording){stopFallbackAudioRecording();return}
         if(dictationListening){speechController?.stop();return}
         if(ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)
             !=PackageManager.PERMISSION_GRANTED){
@@ -259,6 +271,10 @@ class MainActivity:ComponentActivity(){
         } else beginDictation()
     }
     private fun queueDistribution() {
+        if(fallbackAudioRecording){
+            dictationNotice="أوقف التسجيل أولًا ثم راجع النص بعد التفريغ قبل توزيع المهام"
+            return
+        }
         if(dictationListening){
             distributeAfterStop=true
             speechController?.stop()
@@ -267,15 +283,15 @@ class MainActivity:ComponentActivity(){
             distributeRequests++
         }
     }
-    private fun beginDictation() {
-        if(!LiveSpeechController.onDeviceAvailable(this) &&
+    private fun beginDictation(forceSystem: Boolean = false) {
+        if((forceSystem || !LiveSpeechController.onDeviceAvailable(this)) &&
             !settingsPrefs.getBoolean("allow_system_speech",false)) {
             AlertDialog.Builder(this)
                 .setTitle("خصوصية الإملاء الفوري")
                 .setMessage("هذا الهاتف لا يوفر حاليًا محرك تعرف صوتي محليًا للتطبيق. يمكن استخدام خدمة التعرف الصوتي الخاصة بالنظام، لكنها قد تعالج الصوت عبر الإنترنت لدى مزود الهاتف (وليس OpenAI API). هل توافق؟")
                 .setPositiveButton("أوافق") { _, _ ->
                     settingsPrefs.edit().putBoolean("allow_system_speech",true).apply()
-                    beginDictation()
+                    beginDictation(forceSystem = forceSystem)
                 }
                 .setNegativeButton("إلغاء",null)
                 .show()
@@ -301,9 +317,119 @@ class MainActivity:ComponentActivity(){
                     distributeRequests++
                 }
             },
-            onErrorMessage={dictationNotice=it}
+            onErrorMessage={dictationNotice=it},
+            onRecognitionUnavailable={reason ->
+                showAudioFallbackChoice(reason)
+            },
+            onSystemConsentRequired={ reason ->
+                dictationNotice=reason
+                AlertDialog.Builder(this)
+                    .setTitle("تجربة محرك تعرف صوتي بديل")
+                    .setMessage(reason)
+                    .setPositiveButton("أوافق وأجرّب") { _, _ ->
+                        settingsPrefs.edit().putBoolean("allow_system_speech",true).apply()
+                        beginDictation(forceSystem = true)
+                    }
+                    .setNegativeButton("إلغاء",null)
+                    .show()
+            },
+            forceSystemRecognizer=forceSystem
         )
         speechController?.start()
+    }
+
+    /** Local audio capture is independent of Android SpeechRecognizer: works even for errors 8/11/12.
+     * No audio is transmitted without the explicit confirmation after recording. */
+    private fun showAudioFallbackChoice(reason: String) {
+        if (fallbackPromptShowing || isFinishing || isDestroyed) return
+        fallbackPromptShowing=true
+        AlertDialog.Builder(this)
+            .setTitle("الإملاء المباشر غير متاح")
+            .setMessage("$reason\n\nتقدر تسجل الصوت على جهازك ثم تختار تفريغه عبر OpenAI API. التسجيل لا يُرفع إلا بعد موافقتك، ويستهلك من ميزانية الوضع الذكي.")
+            .setPositiveButton("سجل صوتًا للتفريغ") { _, _ ->
+                fallbackPromptShowing=false
+                requestFallbackAudioRecording()
+            }
+            .setNegativeButton("كتابة يدويًا") { _, _ ->fallbackPromptShowing=false }
+            .setOnCancelListener {fallbackPromptShowing=false}
+            .show()
+    }
+
+    private fun requestFallbackAudioRecording() {
+        if (!settingsPrefs.getBoolean("smart_mode",false)) {
+            dictationNotice="فعّل الوضع الذكي من الرئيسية لاستخدام تفريغ الصوت عبر API"
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED) {
+            fallbackPendingPermission=true
+            dictationPermission.launch(Manifest.permission.RECORD_AUDIO)
+        } else startFallbackAudioRecording()
+    }
+
+    private fun startFallbackAudioRecording() {
+        if (fallbackAudioRecording || recording || dictationListening) return
+        val file=File(db.voiceDir(),"dictation_${System.currentTimeMillis()}.m4a")
+        try {
+            @Suppress("DEPRECATION")
+            val r=if(Build.VERSION.SDK_INT>=31) MediaRecorder(this) else MediaRecorder()
+            r.setAudioSource(MediaRecorder.AudioSource.MIC)
+            r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            r.setAudioEncodingBitRate(64000)
+            r.setAudioSamplingRate(44100)
+            r.setOutputFile(file.absolutePath)
+            r.prepare()
+            r.start()
+            fallbackAudioRecorder=r
+            fallbackAudioFile=file
+            fallbackAudioRecording=true
+            dictationNotice="جارٍ تسجيل الصوت على الجهاز. اضغط «أوقف التسجيل» ثم وافق على التفريغ."
+        } catch(e:Exception) {
+            runCatching { fallbackAudioRecorder?.release() }
+            fallbackAudioRecorder=null
+            file.delete()
+            dictationNotice="تعذر تشغيل تسجيل الصوت المحلي: ${e.message.orEmpty()}"
+        }
+    }
+
+    private fun stopFallbackAudioRecording() {
+        if (!fallbackAudioRecording) return
+        fallbackAudioRecording=false
+        val file=fallbackAudioFile
+        fallbackAudioFile=null
+        val valid=try {
+            fallbackAudioRecorder?.stop()
+            true
+        } catch (_:Exception) {false} finally {
+            runCatching {fallbackAudioRecorder?.release()}
+            fallbackAudioRecorder=null
+        }
+        if (!valid || file==null || !file.exists() || file.length()<1000L) {
+            file?.delete()
+            dictationNotice="التسجيل غير مكتمل؛ جرّب مرة أخرى"
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("تفريغ التسجيل عبر OpenAI")
+            .setMessage("هل توافق على إرسال هذا التسجيل المحدد إلى OpenAI للتفريغ؟ لن يُرسل أي ملف آخر، وستُحسب تكلفة العملية ضمن ميزانية API. يمكنك إلغاء الإرسال والاحتفاظ بالبيانات على جهازك.")
+            .setPositiveButton("أوافق على التفريغ") { _, _ ->
+                dictationNotice="جارٍ تفريغ التسجيل..."
+                lifecycleScope.launch {
+                    try {
+                        val transcript=com.secondbrain.ai.ai.SmartApiClient(this@MainActivity).transcribe(file)
+                        dictationText=(dictationText.trimEnd()+" "+transcript).trim()
+                        dictationNotice="تم التفريغ. راجع النص ثم اضغط «وزّع المهام»."
+                    } catch(e:Exception) {
+                        dictationNotice="تعذر التفريغ: ${e.message.orEmpty().take(160)} — التسجيل محفوظ على الجهاز"
+                        return@launch
+                    }
+                    file.delete()
+                }
+            }
+            .setNegativeButton("لا ترسل") {_,_->
+                dictationNotice="لم يُرسل الصوت. تم حفظ التسجيل على جهازك: ${file.name}"
+            }
+            .show()
     }
 
     override fun onSaveInstanceState(outState:Bundle) {
@@ -346,6 +472,12 @@ class MainActivity:ComponentActivity(){
     }
     override fun onDestroy(){
         speechController?.destroy()
+        if (fallbackAudioRecording) {
+            fallbackAudioRecording=false
+            runCatching { fallbackAudioRecorder?.stop() }
+            runCatching { fallbackAudioRecorder?.release() }
+            fallbackAudioRecorder=null
+        }
         // Rotation/screen-size changes are handled without destroying this Activity (see manifest).
         // If Android destroys it for any other reason, finalize and link the recording before DB close.
         if(recording)stopRecording()

@@ -90,8 +90,9 @@ private fun pickDateTime(context: Context, initial: Long?, onPicked: (Long) -> U
 @Composable
 fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean,
                    dictationText: String, dictationPartial: String, dictationListening: Boolean,
-                   dictationNotice: String, distributeRequests: Int,
+                   dictationFallbackRecording: Boolean, dictationNotice: String, distributeRequests: Int,
                    onDictationChange: (String) -> Unit, onDictationToggle: () -> Unit,
+                   onFallbackRecordToggle: () -> Unit,
                    onQueueDistribution: () -> Unit,
                    onRecord: () -> Unit,
                    onAttach: (String) -> Unit, onShare: (String) -> Unit, onBackup: () -> Unit,
@@ -148,8 +149,9 @@ fun SecondBrainApp(db: BrainDatabase, trigger: Int, recording: Boolean,
                         "reports" -> ReportScreen(db,workspaces,tasks,projects,revision,onRefresh={reload()},onShare=onShare,smartMode=smartMode,api=smartClient)
                         "assistant" -> AssistantScreen(db,smartMode,smartClient,onSaved={reload()},onGoSettings={screen="settings"},
                             text=dictationText,partial=dictationPartial,listening=dictationListening,
-                            notice=dictationNotice,distributeRequests=distributeRequests,
+                            fallbackRecording=dictationFallbackRecording,notice=dictationNotice,distributeRequests=distributeRequests,
                             onTextChange=onDictationChange,onDictationToggle=onDictationToggle,
+                            onFallbackRecordToggle=onFallbackRecordToggle,
                             onQueueDistribution=onQueueDistribution,
                             onRecordClip=onRecord,recordingClip=recording)
                         "settings" -> SettingsScreen(db,smartMode,onToggle={smartMode=it;prefs.edit().putBoolean("smart_mode",it).apply()},onBackup=onBackup,onAssistant={screen="assistant"},lockEnabled=lockEnabled,onLockToggle=onLockToggle,
@@ -654,10 +656,12 @@ private fun AssistantScreen(
     text: String,
     partial: String,
     listening: Boolean,
+    fallbackRecording: Boolean,
     notice: String,
     distributeRequests: Int,
     onTextChange: (String) -> Unit,
     onDictationToggle: () -> Unit,
+    onFallbackRecordToggle: () -> Unit,
     onQueueDistribution: () -> Unit,
     onRecordClip: () -> Unit,
     recordingClip: Boolean
@@ -755,10 +759,14 @@ private fun AssistantScreen(
             Text("إملاء فوري — الكلام يظهر أثناء التحدث",fontWeight=FontWeight.Bold,color=GOLD_PALE,fontSize=14.sp)
             Text("الزر الرئيسي يستخدم محرك التعرف على الكلام في الهاتف، بدون رفع تسجيل إلى API التطبيق. إن لم يتوفر محرك محلي سنطلب موافقتك قبل استخدام محرك النظام الذي قد يحتاج إنترنت.",color=MUTED,fontSize=11.sp)
             Spacer(Modifier.height(10.dp))
-            GoldButton(if(listening) "■ أنهِ الإملاء" else "🎙 ابدأ الكلام المباشر",{
+            GoldButton(if(fallbackRecording) "■ أوقف التسجيل الصوتي" else if(listening) "■ أنهِ الإملاء" else "🎙 ابدأ الكلام المباشر",{
                 if(recordingClip)error="أنه تسجيل المقطع المحفوظ أولًا قبل الإملاء المباشر"
                 else onDictationToggle()
             },Modifier.fillMaxWidth())
+            if(fallbackRecording) Text("التسجيل المحلي جارٍ؛ بعد الإيقاف سيُطلب إذنك قبل إرساله للـ API.",color=GREEN,fontSize=11.sp)
+            LineButton(if(fallbackRecording) "■ أوقف تسجيل API البديل" else "🎙 بديل عند تعذر الإملاء: سجل ثم فرّغ بالـ API",{
+                if (listening || recordingClip) error="أوقف التسجيل الحالي قبل استخدام البديل" else onFallbackRecordToggle()
+            }, Modifier.fillMaxWidth())
             if(listening) Text("نتابع كلامك الآن؛ الكلمات غير النهائية تظهر داخل مربع النص ثم تُثبت عند اكتمال الجملة.",color=GREEN,fontSize=11.sp)
             if(notice.isNotBlank()) Text(notice,color=GOLD_PALE,fontSize=11.sp)
             if(recordingClip) Text("يُحفظ تسجيل صوتي منفصل الآن؛ أوقفه من الزر أدناه.",color=MUTED,fontSize=11.sp)
@@ -782,10 +790,12 @@ private fun AssistantScreen(
         }
         Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             GoldButton(if(loading)"جارٍ التوزيع..." else "✦ وزّع المهام",{
-                if(listening) onQueueDistribution() else extract(false)
+                if(fallbackRecording)error="أوقف تسجيل الصوت وانتظر التفريغ قبل توزيع المهام"
+                else if(listening) onQueueDistribution() else extract(false)
             },Modifier.weight(1f))
             LineButton("📅 استخرج المواعيد",{
-                if(listening) error="أنهِ الإملاء أولًا لتثبيت آخر الكلمات، ثم اضغط استخراج المواعيد"
+                if(fallbackRecording) error="أوقف التسجيل وانتظر التفريغ أولًا"
+                else if(listening) error="أنهِ الإملاء أولًا لتثبيت آخر الكلمات، ثم اضغط استخراج المواعيد"
                 else extract(true)
             },Modifier.weight(1f))
         }
